@@ -43,10 +43,6 @@ JSBSim::JSBSim(const char *frame_str) :
     sock_control(false),
     sock_fgfdm(true),
     initialised(false),
-    jsbsim_script(nullptr),
-    jsbsim_fgout(nullptr),
-    created_templates(false),
-    started_jsbsim(false),
     opened_control_socket(false),
     opened_fdm_socket(false),
     frame(FRAME_NORMAL)
@@ -69,226 +65,6 @@ JSBSim::JSBSim(const char *frame_str) :
            control_port, fdm_port);
 }
 
-/*
-  create template files
- */
-bool JSBSim::create_templates(void)
-{
-    if (created_templates) {
-        return true;
-    }
-
-    asprintf(&jsbsim_script, "%s/jsbsim_start_%u.xml", autotest_dir, instance);
-    asprintf(&jsbsim_fgout,  "%s/jsbsim_fgout_%u.xml", autotest_dir, instance);
-
-    printf("JSBSim_script: '%s'\n", jsbsim_script);
-    printf("JSBSim_fgout: '%s'\n", jsbsim_fgout);
-
-    FILE *f = fopen(jsbsim_script, "w");
-    if (f == nullptr) {
-        AP_HAL::panic("Unable to create jsbsim script %s", jsbsim_script);
-    }
-    fprintf(f,
-"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-"<?xml-stylesheet type=\"text/xsl\" href=\"http://jsbsim.sf.net/JSBSimScript.xsl\"?>\n"
-"<runscript xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n"
-"    xsi:noNamespaceSchemaLocation=\"http://jsbsim.sf.net/JSBSimScript.xsd\"\n"
-"    name=\"Testing %s\">\n"
-"\n"
-"  <description>\n"
-"    test ArduPlane using %s and JSBSim\n"
-"  </description>\n"
-"\n"
-"  <use aircraft=\"%s\" initialize=\"reset\"/>\n"
-"\n"
-"  <!-- we control the servos via the jsbsim console\n"
-"       interface on TCP 5124 -->\n"
-"  <input port=\"%u\"/>\n"
-"\n"
-"  <run start=\"0\" end=\"10000000\" dt=\"%.6f\">\n"
-"    <property value=\"0\"> simulation/notify-time-trigger </property>\n"
-"\n"
-"    <event name=\"start engine\">\n"
-"      <condition> simulation/sim-time-sec le 0.01 </condition>\n"
-"      <set name=\"propulsion/engine[0]/set-running\" value=\"1\"/>\n"
-"      <notify/>\n"
-"    </event>\n"
-"\n"
-"    <event name=\"Trim\">\n"
-"      <condition>simulation/sim-time-sec ge 0.01</condition>\n"
-"      <set name=\"simulation/do_simple_trim\" value=\"2\"/>\n"
-"      <notify/>\n"
-"    </event>\n"
-"  </run>\n"
-"\n"
-"</runscript>\n"
-"",
-            jsbsim_model,
-            jsbsim_model,
-            jsbsim_model,
-            control_port,
-            1.0/rate_hz);
-    fclose(f);
-
-    f = fopen(jsbsim_fgout, "w");
-    if (f == nullptr) {
-        AP_HAL::panic("Unable to create jsbsim fgout script %s", jsbsim_fgout);
-    }
-    fprintf(f, "<?xml version=\"1.0\"?>\n"
-            "<output name=\"127.0.0.1\" type=\"FLIGHTGEAR\" port=\"%u\" protocol=\"UDP\" rate=\"%f\">\n"
-            "  <time type=\"simulation\" resolution=\"1e-6\"/>\n"
-            "</output>",
-            fdm_port, rate_hz);
-    fclose(f);
-
-    char *jsbsim_reset;
-    asprintf(&jsbsim_reset, "%s/aircraft/%s/reset.xml", autotest_dir, jsbsim_model);
-
-    printf("JSBSim_reset: '%s'\n", jsbsim_reset);
-
-    f = fopen(jsbsim_reset, "w");
-    if (f == nullptr) {
-        AP_HAL::panic("Unable to create jsbsim reset script %s", jsbsim_reset);
-    }
-    float r, p, y;
-    dcm.to_euler(&r, &p, &y);
-    fprintf(f,
-            "<?xml version=\"1.0\"?>\n"
-            "<initialize name=\"Start up location\">\n"
-            "  <latitude unit=\"DEG\" type=\"geodetic\"> %f </latitude>\n"
-            "  <longitude unit=\"DEG\"> %f </longitude>\n"
-            "  <altitude unit=\"M\"> 1.3 </altitude>\n"
-            "  <vt unit=\"FT/SEC\"> 0.0 </vt>\n"
-            "  <gamma unit=\"DEG\"> 0.0 </gamma>\n"
-            "  <phi unit=\"DEG\"> 0.0 </phi>\n"
-            "  <theta unit=\"DEG\"> 13.0 </theta>\n"
-            "  <psi unit=\"DEG\"> %f </psi>\n"
-            "</initialize>\n",
-            home.lat*1.0e-7,
-            home.lng*1.0e-7,
-            degrees(y));
-    fclose(f);
-
-    created_templates = true;
-    return true;
-}
-
-
-/*
-  start JSBSim child
- */
-bool JSBSim::start_JSBSim(void)
-{
-    if (started_jsbsim) {
-        return true;
-    }
-    if (!open_fdm_socket()) {
-        return false;
-    }
-
-    int p[2];
-    int devnull = open("/dev/null", O_RDWR|O_CLOEXEC);
-    if (pipe(p) != 0) {
-        AP_HAL::panic("Unable to create pipe");
-    }
-    pid_t child_pid = fork();
-    if (child_pid == 0) {
-        // in child
-        setsid();
-        dup2(devnull, 0);
-        dup2(p[1], 1);
-        close(p[0]);
-        for (uint8_t i=3; i<100; i++) {
-            close(i);
-        }
-        char *logdirective;
-        char *script;
-        char *nice;
-        char *rate;
-
-        asprintf(&logdirective, "--logdirectivefile=%s", jsbsim_fgout);
-        asprintf(&script, "--script=%s", jsbsim_script);
-        asprintf(&nice, "--nice=%.8f", 10*1e-9);
-        asprintf(&rate, "--simulation-rate=%f", rate_hz);
-
-        if (chdir(autotest_dir) != 0) {
-            perror(autotest_dir);
-            exit(1);
-        }
-
-        int ret = execlp("JSBSim",
-                         "JSBSim",
-                         "--suspend",
-                         rate,
-                         nice,
-                         logdirective,
-                         script,
-                         nullptr);
-        if (ret != 0) {
-            perror("JSBSim");
-        }
-        exit(1);
-    }
-    close(p[1]);
-    jsbsim_stdout = p[0];
-
-    // read startup to be sure it is running
-    char c;
-    if (read(jsbsim_stdout, &c, 1) != 1) {
-        AP_HAL::panic("Unable to start JSBSim");
-    }
-
-    if (!expect("JSBSim Execution beginning")) {
-        AP_HAL::panic("Failed to start JSBSim");
-    }
-    if (!open_control_socket()) {
-        AP_HAL::panic("Failed to open JSBSim control socket");
-    }
-
-    fcntl(jsbsim_stdout, F_SETFL, fcntl(jsbsim_stdout, F_GETFL, 0) | O_NONBLOCK);
-
-    started_jsbsim = true;
-    // check_stdout();
-    close(devnull);
-    return true;
-}
-
-/*
-  check for stdout from JSBSim
- */
-void JSBSim::check_stdout(void) const
-{
-    char line[100];
-    ssize_t ret = ::read(jsbsim_stdout, line, sizeof(line));
-    if (ret > 0) {
-#if DEBUG_JSBSIM
-        write(1, line, ret);
-#endif
-    }
-}
-
-/*
-  a simple function to wait for a string on jsbsim_stdout
- */
-bool JSBSim::expect(const char *str) const
-{
-    const char *basestr = str;
-    while (*str) {
-        char c;
-        if (read(jsbsim_stdout, &c, 1) != 1) {
-            return false;
-        }
-        if (c == *str) {
-            str++;
-        } else {
-            str = basestr;
-        }
-#if DEBUG_JSBSIM
-        write(1, &c, 1);
-#endif
-    }
-    return true;
-}
 
 /*
   open control socket to JSBSim
@@ -298,7 +74,7 @@ bool JSBSim::open_control_socket(void)
     if (opened_control_socket) {
         return true;
     }
-    if (!sock_control.connect("172.22.176.1", control_port)) {
+    if (!sock_control.connect("127.0.0.1", control_port)) {
         return false;
     }
     printf("Opened JSBSim control socket\n");
@@ -308,7 +84,6 @@ bool JSBSim::open_control_socket(void)
     char startup[] =
         "info\n"
         "resume\n"
-        "iterate 1\n"
         "set atmosphere/turb-type 4\n";
     sock_control.send(startup, strlen(startup));
     return true;
@@ -322,8 +97,7 @@ bool JSBSim::open_fdm_socket(void)
     if (opened_fdm_socket) {
         return true;
     }
-    if (!sock_fgfdm.bind("172.22.182.203", fdm_port)) {
-        // check_stdout();
+    if (!sock_fgfdm.bind("127.0.0.1", fdm_port)) {
         printf("Failed to open JSBSim fdm socket\n");
         return false;
     }
@@ -368,8 +142,7 @@ void JSBSim::send_servos(const struct sitl_input &input)
              "set atmosphere/psiw-rad %f\n"
              "set atmosphere/wind-mag-fps %f\n"
              "set atmosphere/turbulence/milspec/windspeed_at_20ft_AGL-fps %f\n"
-             "set atmosphere/turbulence/milspec/severity %f\n"
-             "iterate 1\n",
+             "set atmosphere/turbulence/milspec/severity %f\n",
              aileron, elevator, rudder, throttle,
              radians(input.wind.direction),
              wind_speed_fps,
@@ -418,13 +191,11 @@ void JSBSim::recv_fdm(const struct sitl_input &input)
 {
     FGNetFDM fdm;
     memset(&fdm, 0, sizeof(fdm));
-    // check_stdout();
     time_now_us = fdm.cur_time; 
 
     do {
         while (sock_fgfdm.recv(&fdm, sizeof(fdm), 100) != sizeof(fdm)) {
             send_servos(input);
-            // check_stdout();
         }
         fdm.ByteSwap();
     } while (fdm.cur_time == time_now_us);

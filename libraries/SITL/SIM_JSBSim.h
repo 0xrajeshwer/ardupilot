@@ -76,14 +76,11 @@ private:
         FRAME_VTAIL
     } frame;
 
-    bool create_templates(void);
-    bool start_JSBSim(void);
+
     bool open_control_socket(void);
     bool open_fdm_socket(void);
     void send_servos(const struct sitl_input &input);
     void recv_fdm(const struct sitl_input &input);
-    void check_stdout(void) const;
-    bool expect(const char *str) const;
 
     void drain_control_socket();
 };
