@@ -248,7 +248,7 @@ bool JSBSim::start_JSBSim(void)
     fcntl(jsbsim_stdout, F_SETFL, fcntl(jsbsim_stdout, F_GETFL, 0) | O_NONBLOCK);
 
     started_jsbsim = true;
-    check_stdout();
+    // check_stdout();
     close(devnull);
     return true;
 }
@@ -298,7 +298,7 @@ bool JSBSim::open_control_socket(void)
     if (opened_control_socket) {
         return true;
     }
-    if (!sock_control.connect("127.0.0.1", control_port)) {
+    if (!sock_control.connect("172.22.176.1", control_port)) {
         return false;
     }
     printf("Opened JSBSim control socket\n");
@@ -322,8 +322,9 @@ bool JSBSim::open_fdm_socket(void)
     if (opened_fdm_socket) {
         return true;
     }
-    if (!sock_fgfdm.bind("127.0.0.1", fdm_port)) {
-        check_stdout();
+    if (!sock_fgfdm.bind("172.22.182.203", fdm_port)) {
+        // check_stdout();
+        printf("Failed to open JSBSim fdm socket\n");
         return false;
     }
     sock_fgfdm.set_blocking(false);
@@ -416,12 +417,14 @@ void FGNetFDM::ByteSwap(void)
 void JSBSim::recv_fdm(const struct sitl_input &input)
 {
     FGNetFDM fdm;
-    check_stdout();
+    memset(&fdm, 0, sizeof(fdm));
+    // check_stdout();
+    time_now_us = fdm.cur_time; 
 
     do {
         while (sock_fgfdm.recv(&fdm, sizeof(fdm), 100) != sizeof(fdm)) {
             send_servos(input);
-            check_stdout();
+            // check_stdout();
         }
         fdm.ByteSwap();
     } while (fdm.cur_time == time_now_us);
@@ -466,14 +469,13 @@ void JSBSim::drain_control_socket()
 void JSBSim::update(const struct sitl_input &input)
 {
     while (!initialised) {
-        if (!create_templates() ||
-            !start_JSBSim() ||
-            !open_control_socket() ||
+        if (!open_control_socket() ||
             !open_fdm_socket()) {
             time_now_us = 1;
             return;
         }
         initialised = true;
+        printf("JSBSim initialised\n");
     }
     send_servos(input);
     recv_fdm(input);
