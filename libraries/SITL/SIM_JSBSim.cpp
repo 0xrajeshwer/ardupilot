@@ -58,11 +58,6 @@ JSBSim::JSBSim(const char *frame_str) :
     if (model_name != nullptr) {
         jsbsim_model = model_name + 1;
     }
-    control_port = 5505 + instance*10;
-    fdm_port = 5504 + instance*10;
-
-    printf("JSBSim backend started: control_port=%u fdm_port=%u\n",
-           control_port, fdm_port);
 }
 
 
@@ -74,6 +69,12 @@ bool JSBSim::open_control_socket(void)
     if (opened_control_socket) {
         return true;
     }
+
+    control_port = 5505 + instance*10;
+    fdm_port = 5504 + instance*10;
+    printf("JSBSim backend started: control_port=%u fdm_port=%u\n",
+           control_port, fdm_port);
+    
     if (!sock_control.connect("127.0.0.1", control_port)) {
         return false;
     }
