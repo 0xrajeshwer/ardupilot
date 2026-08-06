@@ -73,13 +73,15 @@ private:
     enum {
         FRAME_NORMAL,
         FRAME_ELEVON,
-        FRAME_VTAIL
+        FRAME_VTAIL,
+        FRAME_VTOL_ELEVON
     } frame;
 
 
     bool open_control_socket(void);
     bool open_fdm_socket(void);
     void send_servos(const struct sitl_input &input);
+    void send_servos_vtol_elevon(const struct sitl_input &input);
     void recv_fdm(const struct sitl_input &input);
 
     void drain_control_socket();

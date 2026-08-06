@@ -51,6 +51,8 @@ JSBSim::JSBSim(const char *frame_str) :
         frame = FRAME_ELEVON;
     } else if (strstr(frame_str, "vtail")) {
         frame = FRAME_VTAIL;
+    } else if (strstr(frame_str, "vtol")) {
+        frame = FRAME_VTOL_ELEVON;
     } else {
         frame = FRAME_NORMAL;
     }
@@ -72,8 +74,8 @@ bool JSBSim::open_control_socket(void)
 
     control_port = 5505 + instance*10;
     fdm_port = 5504 + instance*10;
-    printf("JSBSim backend started: control_port=%u fdm_port=%u\n",
-           control_port, fdm_port);
+    printf("JSBSim backend started: control_port=%u fdm_port=%u frame_type=%d\n",
+           control_port, fdm_port, frame);
     
     if (!sock_control.connect("127.0.0.1", control_port)) {
         return false;
@@ -108,6 +110,67 @@ bool JSBSim::open_fdm_socket(void)
     return true;
 }
 
+void JSBSim::send_servos_vtol_elevon(const struct sitl_input &input)
+{
+    char *buf = nullptr;
+
+    // Forward surface controls (elevon mixing done in JSBSim FCS)
+    float aileron  = filtered_servo_angle(input, 0);   // CH1
+    float elevator = filtered_servo_angle(input, 1);   // CH2
+    float fwd_thr  = filtered_servo_range(input, 2);   // CH3  forward motor
+
+    // 4 VTOL lift motors (CH5-CH8, indices 4-7 in zero-based sitl_input)
+    float vtol_fl  = filtered_servo_range(input, 4);   // CH5  front-left
+    float vtol_fr  = filtered_servo_range(input, 5);   // CH6  front-right
+    float vtol_rl  = filtered_servo_range(input, 6);   // CH7  rear-left
+    float vtol_rr  = filtered_servo_range(input, 7);   // CH8  rear-right
+
+    float wind_speed_fps = input.wind.speed / FEET_TO_METERS;
+
+    asprintf(&buf,
+             // Elevon surfaces
+             "set fcs/aileron-cmd-norm %f\n"
+             "set fcs/elevator-cmd-norm %f\n"
+             // Forward pusher/tractor motor (engine[0])
+             "set fcs/throttle-cmd-norm[0] %f\n"
+             // VTOL lift motors (engines[1..4])
+             "set fcs/throttle-cmd-norm[1] %f\n"
+             "set fcs/throttle-cmd-norm[2] %f\n"
+             "set fcs/throttle-cmd-norm[3] %f\n"
+             "set fcs/throttle-cmd-norm[4] %f\n"
+             // Atmosphere
+             "set atmosphere/psiw-rad %f\n"
+             "set atmosphere/wind-mag-fps %f\n"
+             "set atmosphere/turbulence/milspec/windspeed_at_20ft_AGL-fps %f\n"
+             "set atmosphere/turbulence/milspec/severity %f\n"
+             "iterate 1\n",
+             aileron,
+             -elevator,
+             fwd_thr,
+             vtol_fl,
+             vtol_fr,
+             vtol_rl,
+             vtol_rr,
+             radians(input.wind.direction),
+             wind_speed_fps,
+             wind_speed_fps/3,
+             input.wind.turbulence);
+
+    ssize_t buflen = strlen(buf);
+    ssize_t sent = sock_control.send(buf, buflen);
+    free(buf);
+
+    if (sent < 0) {
+        if (errno != EAGAIN) {
+            fprintf(stderr, "Fatal: Failed to send on control socket: %s\n",
+                    strerror(errno));
+            exit(1);
+        }
+    }
+    if (sent < buflen) {
+        fprintf(stderr, "Failed to send all bytes on control socket\n");
+    }
+}
 
 /*
   decode and send servos
@@ -250,7 +313,12 @@ void JSBSim::update(const struct sitl_input &input)
         initialised = true;
         printf("JSBSim initialised\n");
     }
-    send_servos(input);
+    if(frame == FRAME_VTOL_ELEVON) {
+        send_servos_vtol_elevon(input);
+    } else {
+        send_servos(input);
+    }
+    // send_servos(input);
     recv_fdm(input);
     adjust_frame_time(rate_hz);
     sync_frame_time();

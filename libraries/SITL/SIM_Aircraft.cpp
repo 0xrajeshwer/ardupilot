@@ -904,15 +904,17 @@ void Aircraft::smooth_sensors(void)
  */
 float Aircraft::filtered_idx(float v, uint8_t idx)
 {
+
+    if (idx >= ARRAY_SIZE(servo_filter)) {
+        AP_HAL::panic("Attempt to filter invalid servo at offset %u", (unsigned)idx);
+    }
+    
     if (sitl->servo_speed <= 0) {
         return v;
     }
     const float cutoff = 1.0f / (2 * M_PI * sitl->servo_speed);
     servo_filter[idx].set_cutoff_frequency(cutoff);
 
-    if (idx >= ARRAY_SIZE(servo_filter)) {
-        AP_HAL::panic("Attempt to filter invalid servo at offset %u", (unsigned)idx);
-    }
 
     return servo_filter[idx].apply(v, frame_time_us * 1.0e-6f);
 }
