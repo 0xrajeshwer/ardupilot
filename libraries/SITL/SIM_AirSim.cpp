@@ -404,6 +404,47 @@ void AirSim::update(const sitl_input& input)
     // Send servos to AirSim
     output_servos(input);
 
+    /// Battery simulation: Calculate total current draw based on throttle values
+    /// and simulate battery voltage drop over time.
+    ///
+    /// NOTE: AirSim owns the physics/motor model, so ArduPilot's native
+    /// motor-current calculation never runs. We derive a synthetic current
+    /// draw here from the raw commanded PWM (input.servos[]) and write it
+    /// into the Aircraft base-class members (battery_voltage / battery_current),
+    /// NOT into sitl->state directly. Aircraft::fill_fdm() runs after this
+    /// update() returns and copies these member variables into fdm/sitl->state;
+    /// writing to sitl->state here gets silently clobbered by that later copy.
+    float total_current_amps = 0.0f;
+    const float max_amps_per_motor = 15.0f;
+    const uint8_t motor_count = 4;
+
+    for (uint8_t i = 0; i < motor_count; i++) {
+        float pwm = input.servos[i];
+        float throttle = constrain_float((pwm - 1000.0f) / 1000.0f, 0.0f, 1.0f);
+        total_current_amps += (throttle * throttle) * max_amps_per_motor;
+    }
+
+    // Manually calculate capacity drain in the background
+    static float capacity_mah = 5000.0f;
+    static uint32_t last_time_ms = 0;
+    uint32_t now_ms = AP_HAL::millis();
+
+    if (last_time_ms != 0) {
+        float dt_hours = (now_ms - last_time_ms) / 1000.0f / 3600.0f;
+        capacity_mah -= (total_current_amps * 1000.0f) * dt_hours;
+    }
+    last_time_ms = now_ms;
+
+    // Calculate voltage sag and simulate the failsafe drop
+    float resting_voltage = 12.6f;
+    if (capacity_mah <= 1000.0f) {
+        resting_voltage = 10.0f; // Force a low-voltage failsafe trigger
+    }
+
+    // Write into the Aircraft base-class members so fill_fdm() picks them up.
+    battery_voltage = resting_voltage - (total_current_amps * 0.02f);
+    battery_current = total_current_amps;
+
     // Receive sensor data
     recv_fdm(input);
 
