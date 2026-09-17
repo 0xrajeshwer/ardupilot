@@ -488,14 +488,33 @@ void AirSim::update(const sitl_input& input)
     /// NOT into sitl->state directly. Aircraft::fill_fdm() runs after this
     /// update() returns and copies these member variables into fdm/sitl->state;
     /// writing to sitl->state here gets silently clobbered by that later copy.
+    ///
+    /// Motor count is detected dynamically instead of hardcoded, so a hexa
+    /// or octo draws proportionally more current than a quad at the same
+    /// throttle. A servo channel is only counted as an active motor if its
+    /// PWM is above pwm_active_threshold; unused motor slots on smaller
+    /// frames sit at/near zero and are excluded automatically.
     float total_current_amps = 0.0f;
     const float max_amps_per_motor = 15.0f;
-    const uint8_t motor_count = 4;
+    const uint16_t pwm_active_threshold = 900;
+    uint8_t motor_count = 0;
 
-    for (uint8_t i = 0; i < motor_count; i++) {
-        float pwm = input.servos[i];
+    if (output_type == OutputType::Copter) {
+        for (uint8_t i = 0; i < kArduCopterRotorControlCount; i++) {
+            float pwm = input.servos[i];
+            if (pwm < pwm_active_threshold) {
+                continue; // this motor slot isn't driven on the current frame
+            }
+            float throttle = constrain_float((pwm - 1000.0f) / 1000.0f, 0.0f, 1.0f);
+            total_current_amps += (throttle * throttle) * max_amps_per_motor;
+            motor_count++;
+        }
+    } else { // OutputType::Rover
+        // matches the single throttle channel used in output_rover()
+        float pwm = input.servos[2];
         float throttle = constrain_float((pwm - 1000.0f) / 1000.0f, 0.0f, 1.0f);
         total_current_amps += (throttle * throttle) * max_amps_per_motor;
+        motor_count = 1;
     }
 
     // Manually calculate capacity drain in the background
@@ -513,8 +532,12 @@ void AirSim::update(const sitl_input& input)
     // same SoC->voltage discharge curve as SIM_Battery.cpp, so this tracks
     // the real ArduPilot battery model's knee-curve near empty instead of a
     // crude linear approximation.
-    const float full_mah = 5000.0f;
-    const float pack_max_voltage = 12.6f; // 3S LiPo; scale for 4S/6S packs
+    //
+    // Pull pack voltage/capacity from the native SIM_BATT_VOLTAGE and
+    // SIM_BATT_CAP_AH params instead of hardcoding, so this matches whatever
+    // the user has actually configured in Mission Planner without a rebuild.
+    const float pack_max_voltage = (sitl->batt_voltage > 0) ? sitl->batt_voltage : 12.6f;
+    const float full_mah = (sitl->batt_capacity_ah > 0) ? (sitl->batt_capacity_ah * 1000.0f) : 5000.0f;
     float pct_remaining = constrain_float((capacity_mah / full_mah) * 100.0f, 0.0f, 100.0f);
     float resting_voltage = airsim_get_resting_voltage(pct_remaining, pack_max_voltage);
 
