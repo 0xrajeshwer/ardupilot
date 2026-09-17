@@ -34,6 +34,80 @@ extern const AP_HAL::HAL& hal;
 
 using namespace SITL;
 
+/*
+  State-of-charge -> voltage table, ported from SIM_Battery.cpp's discharge
+  curve. Values are volt_per_cell at a given state-of-charge percentage;
+  scaled at lookup time by (pack_max_voltage / max_cell_voltage) so it works
+  for whatever pack voltage this frame simulates (3S, 4S, etc), same as the
+  native battery model does.
+*/
+static const struct {
+    float volt_per_cell;
+    float soc_pct;
+} airsim_soc_table[] = {
+    { 4.173, 100 },
+    { 4.112, 96.15 },
+    { 4.085, 92.31 },
+    { 4.071, 88.46 },
+    { 4.039, 84.62 },
+    { 3.987, 80.77 },
+    { 3.943, 76.92 },
+    { 3.908, 73.08 },
+    { 3.887, 69.23 },
+    { 3.854, 65.38 },
+    { 3.833, 61.54 },
+    { 3.801, 57.69 },
+    { 3.783, 53.85 },
+    { 3.742, 50 },
+    { 3.715, 46.15 },
+    { 3.679, 42.31 },
+    { 3.636, 38.46 },
+    { 3.588, 34.62 },
+    { 3.543, 30.77 },
+    { 3.503, 26.92 },
+    { 3.462, 23.08 },
+    { 3.379, 19.23 },
+    { 3.296, 15.38 },
+    { 3.218, 11.54 },
+    { 3.165, 7.69 },
+    { 3.091, 3.85 },
+    { 2.977, 2.0 },
+    { 2.8,   1.5 },
+    { 2.7,   1.3 },
+    { 2.5,   1.2 },
+    { 2.3,   1.1 },
+    { 2.1,   1.0 },
+    { 1.9,   0.9 },
+    { 1.6,   0.8 },
+    { 1.3,   0.7 },
+    { 1.0,   0.6 },
+    { 0.6,   0.4 },
+    { 0.3,   0.2 },
+    { 0.01,  0.01},
+    { 0.001, 0.001 }};
+
+/*
+  Look up resting (no-load) pack voltage for a given state-of-charge
+  percentage, using the same linear-interpolation approach as
+  Battery::get_resting_voltage() in SIM_Battery.cpp.
+*/
+static float airsim_get_resting_voltage(float charge_pct, float max_voltage)
+{
+    const float max_cell_voltage = airsim_soc_table[0].volt_per_cell;
+    for (uint8_t i = 1; i < ARRAY_SIZE(airsim_soc_table); i++) {
+        if (charge_pct >= airsim_soc_table[i].soc_pct) {
+            float dv1 = charge_pct - airsim_soc_table[i].soc_pct;
+            float dv2 = airsim_soc_table[i-1].soc_pct - airsim_soc_table[i].soc_pct;
+            float vpc1 = airsim_soc_table[i].volt_per_cell;
+            float vpc2 = airsim_soc_table[i-1].volt_per_cell;
+            float cell_volt = vpc1 + (dv1 / dv2) * (vpc2 - vpc1);
+            return (cell_volt / max_cell_voltage) * max_voltage;
+        }
+    }
+    // off the bottom of the table, return a small non-zero to prevent math errors
+    return 0.001f;
+}
+
 AirSim::AirSim(const char *frame_str) :
 	Aircraft(frame_str),
 	sock(true)
@@ -435,14 +509,21 @@ void AirSim::update(const sitl_input& input)
     }
     last_time_ms = now_ms;
 
-    // Calculate voltage sag and simulate the failsafe drop
-    float resting_voltage = 12.6f;
-    if (capacity_mah <= 1000.0f) {
-        resting_voltage = 10.0f; // Force a low-voltage failsafe trigger
-    }
+    // Calculate resting (no-load) voltage from remaining capacity using the
+    // same SoC->voltage discharge curve as SIM_Battery.cpp, so this tracks
+    // the real ArduPilot battery model's knee-curve near empty instead of a
+    // crude linear approximation.
+    const float full_mah = 5000.0f;
+    const float pack_max_voltage = 12.6f; // 3S LiPo; scale for 4S/6S packs
+    float pct_remaining = constrain_float((capacity_mah / full_mah) * 100.0f, 0.0f, 100.0f);
+    float resting_voltage = airsim_get_resting_voltage(pct_remaining, pack_max_voltage);
+
+    // Internal-resistance sag on top of the resting voltage, scaled with
+    // current draw (this is the only part the previous version modeled).
+    const float internal_resistance = 0.02f; // ohms, tune per simulated pack
+    battery_voltage = resting_voltage - (total_current_amps * internal_resistance);
 
     // Write into the Aircraft base-class members so fill_fdm() picks them up.
-    battery_voltage = resting_voltage - (total_current_amps * 0.02f);
     battery_current = total_current_amps;
 
     // Receive sensor data
