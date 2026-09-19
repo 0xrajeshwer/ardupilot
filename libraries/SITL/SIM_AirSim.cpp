@@ -478,25 +478,35 @@ void AirSim::update(const sitl_input& input)
     // Send servos to AirSim
     output_servos(input);
 
-    /// Battery simulation: Calculate total current draw based on throttle values
-    /// and simulate battery voltage drop over time.
+    /// Battery simulation: derive current draw from a simplified physical
+    /// motor model — Power = Thrust x power_factor, Current = Power / Voltage —
+    /// the same relationship ArduPilot's native SIM_Motor.cpp uses for
+    /// non-external-physics vehicles. This ties current to actual airframe
+    /// weight (via hover-throttle calibration) and motor/prop efficiency
+    /// (via power_factor), instead of an arbitrary throttle^2 curve that has
+    /// no connection to physical drone properties.
     ///
-    /// NOTE: AirSim owns the physics/motor model, so ArduPilot's native
-    /// motor-current calculation never runs. We derive a synthetic current
-    /// draw here from the raw commanded PWM (input.servos[]) and write it
-    /// into the Aircraft base-class members (battery_voltage / battery_current),
-    /// NOT into sitl->state directly. Aircraft::fill_fdm() runs after this
-    /// update() returns and copies these member variables into fdm/sitl->state;
-    /// writing to sitl->state here gets silently clobbered by that later copy.
-    ///
-    /// Motor count is detected dynamically instead of hardcoded, so a hexa
-    /// or octo draws proportionally more current than a quad at the same
-    /// throttle. A servo channel is only counted as an active motor if its
-    /// PWM is above pwm_active_threshold; unused motor slots on smaller
-    /// frames sit at/near zero and are excluded automatically.
-    float total_current_amps = 0.0f;
-    const float max_amps_per_motor = 15.0f;
-    const uint16_t pwm_active_threshold = 900;
+    /// vehicle_mass_kg / hover_throttle_frac: set these to match the
+    /// airframe you're simulating — hover_throttle_frac is the same concept
+    /// as ArduPilot's MOT_THST_HOVER param (throttle fraction needed to
+    /// hold hover), typically 0.35-0.55 for a well-built multirotor.
+    /// power_factor_w_per_n: electrical watts consumed per newton of thrust
+    /// produced. This is where motor/prop choice actually matters — a
+    /// larger, more efficient prop needs fewer watts per newton than a
+    /// small, inefficient one. Typical small-quad hardware sits ~100-150
+    /// W/N; larger, more efficient props can be lower.
+    const float vehicle_mass_kg = 1.5f;
+    const float hover_throttle_frac = 0.5f;
+    const float power_factor_w_per_n = 120.0f;
+
+    // Total thrust the airframe needs to hover == its weight in newtons.
+    // thrust_scale is the thrust produced at 100% throttle, assuming a
+    // roughly linear throttle->thrust relationship (same assumption
+    // SIM_Plane.cpp makes for its own thrust_scale calibration).
+    const float thrust_scale = (vehicle_mass_kg * GRAVITY_MSS) / hover_throttle_frac;
+
+    const float pwm_active_threshold = 900;
+    float total_throttle = 0.0f;
     uint8_t motor_count = 0;
 
     if (output_type == OutputType::Copter) {
@@ -506,15 +516,33 @@ void AirSim::update(const sitl_input& input)
                 continue; // this motor slot isn't driven on the current frame
             }
             float throttle = constrain_float((pwm - 1000.0f) / 1000.0f, 0.0f, 1.0f);
-            total_current_amps += (throttle * throttle) * max_amps_per_motor;
+            total_throttle += throttle;
             motor_count++;
         }
     } else { // OutputType::Rover
         // matches the single throttle channel used in output_rover()
         float pwm = input.servos[2];
         float throttle = constrain_float((pwm - 1000.0f) / 1000.0f, 0.0f, 1.0f);
-        total_current_amps += (throttle * throttle) * max_amps_per_motor;
+        total_throttle += throttle;
         motor_count = 1;
+    }
+
+    // Average throttle across active motors drives total simulated thrust.
+    float average_throttle = (motor_count > 0) ? (total_throttle / motor_count) : 0.0f;
+    float total_thrust_n = thrust_scale * average_throttle;
+    float total_power_w = power_factor_w_per_n * total_thrust_n;
+
+    // Use last tick's battery voltage to convert power->current (matches
+    // SIM_Motor.cpp's own current = power / MAX(voltage, 0.1) pattern).
+    // battery_voltage still holds the previous frame's computed value here,
+    // since we haven't overwritten it yet this tick.
+    float total_current_amps = total_power_w / MAX(battery_voltage, 0.1f);
+
+    // Baseline avionics/idle current — FC, ESCs, sensors, RX/telemetry draw
+    // real current even at zero throttle while armed.
+    const float idle_current_amps = 0.5f;
+    if (motor_count > 0) {
+        total_current_amps += idle_current_amps;
     }
 
     // Manually calculate capacity drain in the background
