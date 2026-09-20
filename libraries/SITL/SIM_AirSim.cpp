@@ -487,22 +487,19 @@ void AirSim::update(const sitl_input& input)
     /// (via power_factor), instead of an arbitrary throttle^2 curve that has
     /// no connection to physical drone properties.
     ///
-    /// vehicle_mass_kg / hover_throttle_frac: set these to match the
-    /// airframe you're simulating — hover_throttle_frac is the same concept
-    /// as ArduPilot's MOT_THST_HOVER param (throttle fraction needed to
-    /// hold hover), typically 0.35-0.55 for a well-built multirotor.
-    /// power_factor_w_per_n: electrical watts consumed per newton of thrust
-    /// produced. This is where motor/prop choice actually matters — a
-    /// larger, more efficient prop needs fewer watts per newton than a
-    /// small, inefficient one. Typical small-quad hardware sits ~100-150
-    /// W/N; larger, more efficient props can be lower.
-    const float vehicle_mass_kg = 1.5f;
-    const float hover_throttle_frac = 0.5f;
-    // Real efficient multirotor hardware delivers roughly 8-12 grams of
-    // thrust per watt at the shaft, which converts to ~10-15 W/N. (Previous
-    // value of 120 W/N was off by roughly 10x and would produce unrealistic
-    // triple-digit hover currents.)
-    const float power_factor_w_per_n = 12.0f;
+    /// --- Tuned for a 5" FPV RACING quad, not a camera/survey multirotor ---
+    /// vehicle_mass_kg: ~600g AUW with battery — typical 5" freestyle/race build.
+    /// hover_throttle_frac: racing quads are deliberately overpowered (thrust-
+    /// to-weight often 4:1-6:1+), so hover sits much lower than a camera
+    /// quad's ~0.5 — commonly 0.20-0.30. Using 0.25 here.
+    /// power_factor_w_per_n: high-KV racing motors trade efficiency for power
+    /// density/response, so they deliver noticeably fewer grams of thrust per
+    /// watt than efficient cinematic/survey props — typically ~4-6 g/W vs.
+    /// ~8-12 g/W for efficient hardware. That converts to roughly 18-25 W/N
+    /// here, vs. ~10-15 W/N for the efficient case. Using 20 here.
+    const float vehicle_mass_kg = 0.6f;
+    const float hover_throttle_frac = 0.25f;
+    const float power_factor_w_per_n = 20.0f;
 
     // Total thrust the airframe needs to hover == its weight in newtons.
     // thrust_scale is the thrust produced at 100% throttle, assuming a
@@ -574,9 +571,12 @@ void AirSim::update(const sitl_input& input)
     const float pack_nominal_voltage = (sitl->batt_voltage > 0) ? sitl->batt_voltage : 12.6f;
     float total_current_amps = total_power_w / pack_nominal_voltage;
 
-    // Baseline avionics/idle current — FC, ESCs, sensors, RX/telemetry draw
-    // real current even at zero throttle while armed.
-    const float idle_current_amps = 0.5f;
+    // Baseline avionics/idle current — FC, ESCs, receiver draw real current
+    // even at zero throttle while armed. Racing builds also run a video
+    // transmitter (VTX) and FPV camera continuously, both of which draw
+    // meaningfully more than a typical GPS/telemetry-only camera-quad setup
+    // — bumped from 0.5A to 0.8A to reflect that.
+    const float idle_current_amps = 0.8f;
     if (motor_count > 0) {
         total_current_amps += idle_current_amps;
     }
