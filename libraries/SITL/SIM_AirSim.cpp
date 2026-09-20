@@ -536,11 +536,17 @@ void AirSim::update(const sitl_input& input)
     float total_thrust_n = thrust_scale * average_throttle;
     float total_power_w = power_factor_w_per_n * total_thrust_n;
 
-    // Use last tick's battery voltage to convert power->current (matches
-    // SIM_Motor.cpp's own current = power / MAX(voltage, 0.1) pattern).
-    // battery_voltage still holds the previous frame's computed value here,
-    // since we haven't overwritten it yet this tick.
-    float total_current_amps = total_power_w / MAX(battery_voltage, 0.1f);
+    // Pull nominal pack voltage from SIM_BATT_VOLTAGE (falls back to 12.6 if
+    // unset). IMPORTANT: divide by this fixed nominal value, NOT by the
+    // sagged battery_voltage from the previous tick. Dividing by the sagged
+    // value creates a positive-feedback loop (sag -> higher computed current
+    // -> more sag next tick -> ...) that diverges toward absurd currents and
+    // deeply negative voltage. Real ESCs regulate toward commanded
+    // thrust largely independent of instantaneous terminal voltage, so a
+    // fixed nominal denominator is both more stable and a fair
+    // approximation.
+    const float pack_nominal_voltage = (sitl->batt_voltage > 0) ? sitl->batt_voltage : 12.6f;
+    float total_current_amps = total_power_w / pack_nominal_voltage;
 
     // Baseline avionics/idle current — FC, ESCs, sensors, RX/telemetry draw
     // real current even at zero throttle while armed.
@@ -555,9 +561,9 @@ void AirSim::update(const sitl_input& input)
         static uint32_t debug_counter = 0;
         if (debug_counter++ % 50 == 0) {
             printf("[BATT DEBUG] motor_count=%u avg_thr=%.3f thrust_n=%.3f power_w=%.2f "
-                   "prev_voltage=%.3f current=%.3f servos[0..3]=%u,%u,%u,%u\n",
+                   "nominal_v=%.3f current=%.3f servos[0..3]=%u,%u,%u,%u\n",
                    motor_count, average_throttle, total_thrust_n, total_power_w,
-                   battery_voltage, total_current_amps,
+                   pack_nominal_voltage, total_current_amps,
                    input.servos[0], input.servos[1], input.servos[2], input.servos[3]);
         }
     }
@@ -588,8 +594,12 @@ void AirSim::update(const sitl_input& input)
 
     // Internal-resistance sag on top of the resting voltage, scaled with
     // current draw (this is the only part the previous version modeled).
+    // Clamped to a small positive floor as a safety net — voltage should
+    // never legitimately go negative or to exactly zero; a floor here means
+    // a future calibration mistake degrades to "reads oddly low" instead of
+    // "goes negative and overflows the MAVLink field."
     const float internal_resistance = 0.02f; // ohms, tune per simulated pack
-    battery_voltage = resting_voltage - (total_current_amps * internal_resistance);
+    battery_voltage = MAX(resting_voltage - (total_current_amps * internal_resistance), 0.05f);
 
     // Write into the Aircraft base-class members so fill_fdm() picks them up.
     battery_current = total_current_amps;
