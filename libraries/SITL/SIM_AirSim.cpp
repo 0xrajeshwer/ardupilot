@@ -27,6 +27,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_HAL/utility/replace.h>
+#include <AP_Param/AP_Param.h>
 
 #define UDP_TIMEOUT_MS 100
 
@@ -537,14 +538,39 @@ void AirSim::update(const sitl_input& input)
     float total_power_w = power_factor_w_per_n * total_thrust_n;
 
     // Pull nominal pack voltage from SIM_BATT_VOLTAGE (falls back to 12.6 if
-    // unset). IMPORTANT: divide by this fixed nominal value, NOT by the
+    // unset). Also resolve the real pack capacity here, before it's needed
+    // below, so both the current calc and the voltage curve use the same
+    // consistent values.
+    //
+    // Capacity is read from the CORE ArduPilot param BATT_CAPACITY (the one
+    // AP_BattMonitor itself uses for failsafe % math) rather than the
+    // SITL-only SIM_BATT_CAP_AH param. These are two separate params that
+    // happen to represent the same physical idea — nothing keeps them in
+    // sync automatically, so reading BATT_CAPACITY directly means this
+    // model always matches whatever the user actually configured for real
+    // failsafe behavior, with SIM_BATT_CAP_AH only as a fallback if
+    // BATT_CAPACITY isn't found for some reason.
+    static AP_Int32 *core_batt_capacity_param = nullptr;
+    if (core_batt_capacity_param == nullptr) {
+        enum ap_var_type ptype;
+        core_batt_capacity_param = (AP_Int32 *)AP_Param::find("BATT_CAPACITY", &ptype);
+    }
+    float full_mah;
+    if (core_batt_capacity_param != nullptr && core_batt_capacity_param->get() > 0) {
+        full_mah = (float)core_batt_capacity_param->get();
+    } else if (sitl->batt_capacity_ah > 0) {
+        full_mah = sitl->batt_capacity_ah * 1000.0f;
+    } else {
+        full_mah = 5000.0f;
+    }
+
+    // IMPORTANT: divide current by this fixed nominal voltage, NOT by the
     // sagged battery_voltage from the previous tick. Dividing by the sagged
     // value creates a positive-feedback loop (sag -> higher computed current
     // -> more sag next tick -> ...) that diverges toward absurd currents and
-    // deeply negative voltage. Real ESCs regulate toward commanded
-    // thrust largely independent of instantaneous terminal voltage, so a
-    // fixed nominal denominator is both more stable and a fair
-    // approximation.
+    // deeply negative voltage. Real ESCs regulate toward commanded thrust
+    // largely independent of instantaneous terminal voltage, so a fixed
+    // nominal denominator is both more stable and a fair approximation.
     const float pack_nominal_voltage = (sitl->batt_voltage > 0) ? sitl->batt_voltage : 12.6f;
     float total_current_amps = total_power_w / pack_nominal_voltage;
 
@@ -555,14 +581,31 @@ void AirSim::update(const sitl_input& input)
         total_current_amps += idle_current_amps;
     }
 
-    // Manually calculate capacity drain in the background
-    static float capacity_mah = 5000.0f;
+    // Remaining capacity tracker. This is a function-local static, so it
+    // persists for the entire life of the SITL process — NOT reset by
+    // disarming, changing modes, or an in-sim crash/reset. Without the
+    // arm-transition check below, a fully-drained pack (e.g. from a bug or
+    // a genuine full-discharge test) stays drained forever until you kill
+    // and relaunch sim_vehicle.py entirely, and every subsequent voltage
+    // reading will be stuck near the SoC table's near-empty floor (which is
+    // the "voltage is always 0" symptom).
+    static float capacity_mah = full_mah;
     static uint32_t last_time_ms = 0;
-    uint32_t now_ms = AP_HAL::millis();
+    static bool was_armed = false;
 
+    const bool now_armed = hal.util->get_soft_armed();
+    if (now_armed && !was_armed) {
+        // Just transitioned disarmed -> armed: treat this as a fresh pack.
+        capacity_mah = full_mah;
+        last_time_ms = 0; // avoid an artificial dt spike from time spent disarmed
+    }
+    was_armed = now_armed;
+
+    uint32_t now_ms = AP_HAL::millis();
     if (last_time_ms != 0) {
         float dt_hours = (now_ms - last_time_ms) / 1000.0f / 3600.0f;
         capacity_mah -= (total_current_amps * 1000.0f) * dt_hours;
+        capacity_mah = MAX(capacity_mah, 0.0f); // never go negative
     }
     last_time_ms = now_ms;
 
@@ -570,12 +613,7 @@ void AirSim::update(const sitl_input& input)
     // same SoC->voltage discharge curve as SIM_Battery.cpp, so this tracks
     // the real ArduPilot battery model's knee-curve near empty instead of a
     // crude linear approximation.
-    //
-    // Pull pack voltage/capacity from the native SIM_BATT_VOLTAGE and
-    // SIM_BATT_CAP_AH params instead of hardcoding, so this matches whatever
-    // the user has actually configured in Mission Planner without a rebuild.
-    const float pack_max_voltage = (sitl->batt_voltage > 0) ? sitl->batt_voltage : 12.6f;
-    const float full_mah = (sitl->batt_capacity_ah > 0) ? (sitl->batt_capacity_ah * 1000.0f) : 5000.0f;
+    const float pack_max_voltage = pack_nominal_voltage;
     float pct_remaining = constrain_float((capacity_mah / full_mah) * 100.0f, 0.0f, 100.0f);
     float resting_voltage = airsim_get_resting_voltage(pct_remaining, pack_max_voltage);
 
