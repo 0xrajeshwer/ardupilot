@@ -555,19 +555,6 @@ void AirSim::update(const sitl_input& input)
         total_current_amps += idle_current_amps;
     }
 
-    // TEMPORARY DEBUG — remove once the pipeline is confirmed working.
-    // Prints every ~50 ticks so the console isn't flooded.
-    {
-        static uint32_t debug_counter = 0;
-        if (debug_counter++ % 50 == 0) {
-            printf("[BATT DEBUG] motor_count=%u avg_thr=%.3f thrust_n=%.3f power_w=%.2f "
-                   "nominal_v=%.3f current=%.3f servos[0..3]=%u,%u,%u,%u\n",
-                   motor_count, average_throttle, total_thrust_n, total_power_w,
-                   pack_nominal_voltage, total_current_amps,
-                   input.servos[0], input.servos[1], input.servos[2], input.servos[3]);
-        }
-    }
-
     // Manually calculate capacity drain in the background
     static float capacity_mah = 5000.0f;
     static uint32_t last_time_ms = 0;
