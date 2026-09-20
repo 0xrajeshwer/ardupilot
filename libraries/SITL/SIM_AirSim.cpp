@@ -497,7 +497,11 @@ void AirSim::update(const sitl_input& input)
     /// W/N; larger, more efficient props can be lower.
     const float vehicle_mass_kg = 1.5f;
     const float hover_throttle_frac = 0.5f;
-    const float power_factor_w_per_n = 120.0f;
+    // Real efficient multirotor hardware delivers roughly 8-12 grams of
+    // thrust per watt at the shaft, which converts to ~10-15 W/N. (Previous
+    // value of 120 W/N was off by roughly 10x and would produce unrealistic
+    // triple-digit hover currents.)
+    const float power_factor_w_per_n = 12.0f;
 
     // Total thrust the airframe needs to hover == its weight in newtons.
     // thrust_scale is the thrust produced at 100% throttle, assuming a
@@ -543,6 +547,19 @@ void AirSim::update(const sitl_input& input)
     const float idle_current_amps = 0.5f;
     if (motor_count > 0) {
         total_current_amps += idle_current_amps;
+    }
+
+    // TEMPORARY DEBUG — remove once the pipeline is confirmed working.
+    // Prints every ~50 ticks so the console isn't flooded.
+    {
+        static uint32_t debug_counter = 0;
+        if (debug_counter++ % 50 == 0) {
+            printf("[BATT DEBUG] motor_count=%u avg_thr=%.3f thrust_n=%.3f power_w=%.2f "
+                   "prev_voltage=%.3f current=%.3f servos[0..3]=%u,%u,%u,%u\n",
+                   motor_count, average_throttle, total_thrust_n, total_power_w,
+                   battery_voltage, total_current_amps,
+                   input.servos[0], input.servos[1], input.servos[2], input.servos[3]);
+        }
     }
 
     // Manually calculate capacity drain in the background
